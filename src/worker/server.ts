@@ -78,6 +78,15 @@ function log(level: "error" | "warn" | "info", message: string): void {
 	globalThis.postMessage({ kind: "log", level, message });
 }
 
+function failStartup(error: unknown): void {
+	const message = error instanceof Error ? error.message : String(error);
+	log("error", message);
+	// Signal the host immediately so ready rejects without waiting for
+	// startupTimeout; uncaught rejections do not reliably fire Worker.onerror.
+	globalThis.postMessage({ kind: "error", message });
+	globalThis.close();
+}
+
 function isConfigureMessage(value: unknown): value is ConfigureMessage {
 	return (
 		Boolean(value) &&
@@ -401,13 +410,7 @@ globalThis.onmessage = (event: MessageEvent<unknown>) => {
 	}
 
 	if (isConfigureMessage(data)) {
-		void configure(data).catch((error) => {
-			log(
-				"error",
-				error instanceof Error ? error.message : String(error),
-			);
-			throw error;
-		});
+		void configure(data).catch(failStartup);
 		return;
 	}
 

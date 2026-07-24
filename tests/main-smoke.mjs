@@ -80,6 +80,10 @@ function createFakeWorkerTransport(options) {
 			settleReady();
 			return;
 		}
+		if (data?.kind === "error") {
+			settleReady(new Error(data.message || "Worker failed to start"));
+			return;
+		}
 		if (data?.kind === "host-request") {
 			const method = data.method;
 			const params =
