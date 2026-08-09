@@ -7,6 +7,7 @@ import {
 	getDocumentLinks,
 	resolveCompletionItem,
 } from "@tailwindcss/language-service";
+import plugin from "../../plugin.json";
 import {
 	TextDocument,
 	type TextDocumentContentChangeEvent,
@@ -402,7 +403,7 @@ async function handleRequest(
 				},
 				serverInfo: {
 					name: "Acode Tailwind CSS Language Service",
-					version: "1.1.0",
+					version: plugin.version,
 				},
 			};
 

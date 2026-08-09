@@ -4,21 +4,29 @@
   "name": "Tailwind CSS IntelliSense",
   "main": "main.js",
   "version": "0.1.0",
+  "readme": "readme.md",
+  "changelogs": "changelog.md",
   "repository": "https://github.com/Acode-Foundation/acode-tailwind-languageservice.git",
   "icon": "icon.png",
+  "files": [
+    "tailwind.worker.js"
+  ],
   "minVersionCode": 1002,
   "license": "MIT",
   "keywords": [
     "tailwindcss",
     "lsp",
+    "intellisense",
     "autocomplete",
-    "css"
+    "lint",
+    "css",
+    "offline"
   ],
   "price": 0,
   "permissions": [],
   "author": {
     "name": "Acode Foundation",
-    "email": "",
+    "url": "https://github.com/Acode-Foundation",
     "github": "Acode-Foundation"
   }
 }

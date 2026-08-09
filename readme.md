@@ -1,64 +1,68 @@
 # Tailwind CSS IntelliSense for Acode
 
-A Tailwind CSS language service for Acode. The plugin runs
-entirely inside the editor process and does not launch a terminal, Node.js
-process, STDIO server, or remote service.
+Fast, offline Tailwind CSS IntelliSense for Acode, powered by a lightweight
+Web Worker language service.
 
 ## Features
 
-- Tailwind class completion in HTML, CSS, JavaScript, TypeScript, JSX, TSX,
-  Vue, Svelte, Astro, PHP, Blade, Twig and ERB documents.
-- Completion details generated from the active Tailwind design system.
-- Hover previews with the CSS generated for a class.
-- Tailwind diagnostics and quick fixes.
-- Document colors and Tailwind stylesheet links.
-- Tailwind v4 CSS-first project discovery.
-- Support for multiple Tailwind CSS entrypoints in one workspace.
-- Custom `@theme` values and relative CSS imports.
-- Custom `@theme` blocks embedded in the current HTML document.
-- Automatic reload when an open Tailwind entrypoint is saved.
-- Bundled Tailwind v4 defaults when no project entrypoint can be found.
-- Offline operation after the plugin is installed.
+- Class completions with generated CSS details
+- Hover previews, colors, diagnostics, and quick fixes
+- Tailwind CSS v4 project discovery and multiple entrypoints
+- Custom `@theme` values and relative CSS imports
+- Limited local `@config` and `@plugin` support
+- Embedded `@theme` blocks in supported markup files
+- Support for `clsx`, `cn`, `cva`, `tw`, and `twMerge`
+- No terminal, remote server, or internet connection required
 
-Common class helper functions such as `clsx`, `cn`, `cva`, `tw`, and
-`twMerge` are recognized.
+Supported languages include HTML, CSS, SCSS, Less, JavaScript, TypeScript,
+JSX, TSX, Vue, Svelte, Astro, PHP, Blade, Twig, and ERB.
 
-## Project detection
+## Getting started
 
-The plugin scans the open workspace for CSS files containing one or more of:
+Install **Tailwind CSS IntelliSense** from Acode's **Plugins → Explore** page,
+then open your project as a workspace folder.
+
+The plugin automatically discovers Tailwind stylesheets containing directives
+such as:
 
 ```css
 @import "tailwindcss";
-@theme { }
-@tailwind utilities;
-@config "...";
-@plugin "...";
+
+@theme {
+  --color-brand: #06b6d4;
+}
 ```
 
-The scan excludes dependency, VCS and build-output folders and has safety
-limits for very large or remote workspaces.
+Custom classes are then available in supported documents:
 
-## JavaScript configs and plugins
+```html
+<button class="rounded-lg bg-brand px-4 py-2 text-white">
+  Save
+</button>
+```
 
-Simple local `@config` and `@plugin` modules can run in the worker. The worker
-provides `tailwindcss/colors`, `tailwindcss/defaultTheme`, and
-`tailwindcss/plugin`.
+If no Tailwind entrypoint is found, the bundled Tailwind v4 defaults are used.
 
-Arbitrary npm packages and modules requiring Node.js APIs cannot run in a Web
-Worker. If such a module prevents loading, the plugin keeps the project’s CSS
-theme but omits its `@config` and `@plugin` directives. A message is written to
-the Acode console when this compatibility fallback is used.
+## Compatibility
 
-Tailwind v3 projects receive the bundled Tailwind v4 design system fallback.
-Full JavaScript-config execution for Tailwind v3 would require a Node-compatible
-runtime and is intentionally not emulated by this worker-only plugin.
+- Requires Acode version code `1002` or newer.
+- Tailwind CSS v4 is recommended.
+- Simple local JavaScript configs and plugins are supported.
+- Packages requiring Node.js APIs cannot run inside the Web Worker.
+- Tailwind v3 projects use the bundled Tailwind v4 fallback design system.
 
-## Build
+## Development
 
 ```sh
-bun install
-bun run typecheck
-bun test
+npm ci
+npm run typecheck
+npm test
 ```
 
-The installable artifact is written to `plugin.zip`.
+Report issues on
+[GitHub](https://github.com/Acode-Foundation/acode-tailwind-languageservice/issues).
+
+## License
+
+[MIT](LICENSE). This community plugin is not affiliated with or endorsed by
+Tailwind Labs.

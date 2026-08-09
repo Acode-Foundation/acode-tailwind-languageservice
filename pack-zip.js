@@ -3,42 +3,32 @@ const fs = require('fs');
 const jszip = require('jszip');
 
 const iconFile = path.join(__dirname, 'icon.png');
+const licenseFile = path.join(__dirname, 'LICENSE');
 const pluginJSON = path.join(__dirname, 'plugin.json');
 const distFolder = path.join(__dirname, 'dist');
 const json = JSON.parse(fs.readFileSync(pluginJSON, 'utf8'));
-let readmeDotMd;
-let changelogDotMd;
-
-if (!json.readme) {
-  readmeDotMd = path.join(__dirname, 'readme.md');
-  if (!fs.existsSync(readmeDotMd)) {
-    readmeDotMd = path.join(__dirname, 'README.md');
-  }
-}
-
-
-if (!json.changelogs) {
-  const upperCaseChangelog = path.join(__dirname, 'CHANGELOG.md');
-  const lowerCaseChangelog = path.join(__dirname, 'changelog.md');
-  if (fs.existsSync(upperCaseChangelog)) {
-    changelogDotMd = upperCaseChangelog;
-  } else if (fs.existsSync(lowerCaseChangelog)) {
-    changelogDotMd = lowerCaseChangelog;
-  }
-}
+const readmeDotMd = resolveMetadataFile(json.readme, ['readme.md', 'README.md']);
+const changelogDotMd = resolveMetadataFile(
+  json.changelogs,
+  ['changelog.md', 'CHANGELOG.md'],
+);
 
 // create zip file of dist folder
 
 const zip = new jszip();
 
 zip.file('icon.png', fs.readFileSync(iconFile));
+zip.file('LICENSE', fs.readFileSync(licenseFile));
 zip.file('plugin.json', fs.readFileSync(pluginJSON));
 
 if (readmeDotMd) {
-  zip.file("readme.md", fs.readFileSync(readmeDotMd));
+  zip.file(json.readme || path.basename(readmeDotMd), fs.readFileSync(readmeDotMd));
 }
 if (changelogDotMd) {
-  zip.file("changelog.md", fs.readFileSync(changelogDotMd));
+  zip.file(
+    json.changelogs || path.basename(changelogDotMd),
+    fs.readFileSync(changelogDotMd),
+  );
 }
 
 loadFile('', distFolder);
@@ -66,4 +56,20 @@ function loadFile(root, folder) {
       zip.file(path.join(root, file), fs.readFileSync(path.join(folder, file)));
     }
   });
+}
+
+function resolveMetadataFile(configuredPath, fallbacks) {
+  if (configuredPath) {
+    const file = path.join(__dirname, configuredPath);
+    if (!fs.existsSync(file)) {
+      throw new Error(`Missing plugin metadata file: ${configuredPath}`);
+    }
+    return file;
+  }
+
+  for (const fallback of fallbacks) {
+    const file = path.join(__dirname, fallback);
+    if (fs.existsSync(file)) return file;
+  }
+  return null;
 }

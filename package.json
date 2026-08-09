@@ -11,7 +11,7 @@
     "acode-plugin-types": "^1.12.9",
     "os-browserify": "0.3.0",
     "path-browserify": "1.0.1",
-    "postcss": "8.5.22",
+    "postcss": "8.5.26",
     "process": "0.11.10",
     "tailwindcss": "4.3.3",
     "util": "0.12.5",
@@ -19,7 +19,8 @@
     "vscode-languageserver-textdocument": "1.0.12"
   },
   "overrides": {
-    "postcss": "8.5.22"
+    "nanoid": "3.3.18",
+    "postcss": "8.5.26"
   },
   "devDependencies": {
     "esbuild": "^0.25.8",
