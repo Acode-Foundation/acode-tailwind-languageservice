@@ -17,14 +17,16 @@ const projectCss = `
 
 const controls = [];
 const rpcMessages = [];
+const rpcMessageSizes = new Map();
+const hostCalls = new Map();
 let context;
 
 function hostResult(message) {
+	hostCalls.set(message.method, (hostCalls.get(message.method) ?? 0) + 1);
 	switch (message.method) {
 		case "findProjectFiles":
 			return {
 				css: ["file:///workspace/src/app.css"],
-				configs: [],
 				truncated: false,
 			};
 		case "readFile":
@@ -43,7 +45,9 @@ function hostResult(message) {
 
 function postMessage(message) {
 	if (typeof message === "string") {
-		rpcMessages.push(JSON.parse(message));
+		const parsed = JSON.parse(message);
+		rpcMessages.push(parsed);
+		if (parsed.id != null) rpcMessageSizes.set(parsed.id, message.length);
 		return;
 	}
 
@@ -118,7 +122,9 @@ context.onmessage({
 		kind: "configure",
 		serverId: "tailwindcss-worker",
 		rootUri: "file:///workspace/",
-		initializationOptions: {},
+		initializationOptions: {
+			tailwindCSS: { emmetCompletions: true },
+		},
 	},
 });
 
@@ -177,11 +183,34 @@ send({
 await waitFor(() => rpcMessages.some((message) => message.id === 2));
 const completion = rpcMessages.find((message) => message.id === 2).result;
 assert.ok(
+	completion.items.length <= 750,
+	"completion responses should be bounded before crossing the worker boundary",
+);
+assert.equal(
+	completion.isIncomplete,
+	true,
+	"a truncated completion response should ask the client to request again",
+);
+assert.ok(
+	(rpcMessageSizes.get(2) ?? Infinity) < 300_000,
+	"completion JSON should stay small enough for a mobile worker bridge",
+);
+assert.ok(
 	completion.items.some((item) => item.label === "bg-acode-brand"),
 	"project-defined Tailwind class should be completed",
 );
 const completionItem = completion.items.find(
 	(item) => item.label === "bg-acode-brand",
+);
+assert.equal(
+	typeof completionItem.data?.__a,
+	"number",
+	"completion items should carry a compact document id",
+);
+assert.equal(
+	completionItem.data?.__acodeTailwindUri,
+	undefined,
+	"completion items should not repeat the full document URI",
 );
 send({
 	jsonrpc: "2.0",
@@ -196,6 +225,84 @@ assert.match(
 	/--color-acode-brand/,
 );
 
+const broadDocumentUri = "file:///workspace/src/broad.html";
+send({
+	jsonrpc: "2.0",
+	method: "textDocument/didOpen",
+	params: {
+		textDocument: {
+			uri: broadDocumentUri,
+			languageId: "html",
+			version: 1,
+			text: '<div class="b"></div>',
+		},
+	},
+});
+send({
+	jsonrpc: "2.0",
+	id: 8,
+	method: "textDocument/completion",
+	params: {
+		textDocument: { uri: broadDocumentUri },
+		position: { line: 0, character: 13 },
+		context: { triggerKind: 1 },
+	},
+});
+await waitFor(() => rpcMessages.some((message) => message.id === 8));
+const broadCompletion = rpcMessages.find((message) => message.id === 8).result;
+assert.equal(
+	broadCompletion.items.length,
+	750,
+	"broad completion queries should be capped",
+);
+assert.ok(
+	(rpcMessageSizes.get(8) ?? Infinity) < 300_000,
+	"even broad completion JSON should stay bounded",
+);
+send({
+	jsonrpc: "2.0",
+	method: "textDocument/didClose",
+	params: { textDocument: { uri: broadDocumentUri } },
+});
+
+const emmetDocumentUri = "file:///workspace/src/emmet.html";
+send({
+	jsonrpc: "2.0",
+	method: "textDocument/didOpen",
+	params: {
+		textDocument: {
+			uri: emmetDocumentUri,
+			languageId: "html",
+			version: 1,
+			text: "div.bg-acode",
+		},
+	},
+});
+send({
+	jsonrpc: "2.0",
+	id: 9,
+	method: "textDocument/completion",
+	params: {
+		textDocument: { uri: emmetDocumentUri },
+		position: { line: 0, character: 12 },
+		context: { triggerKind: 1 },
+	},
+});
+await waitFor(() => rpcMessages.some((message) => message.id === 9));
+assert.ok(
+	rpcMessages
+		.find((message) => message.id === 9)
+		.result.items.some((item) => item.label === "bg-acode-brand"),
+	"the lightweight Emmet path should preserve Tailwind class completions",
+);
+send({
+	jsonrpc: "2.0",
+	method: "textDocument/didClose",
+	params: { textDocument: { uri: emmetDocumentUri } },
+});
+
+const embeddedDocumentText =
+	'<style>@theme { --color-inline-theme: #14b8a6; }</style><div class="bg-inline"></div>';
 send({
 	jsonrpc: "2.0",
 	method: "textDocument/didChange",
@@ -226,11 +333,7 @@ send({
 	method: "textDocument/didChange",
 	params: {
 		textDocument: { uri: documentUri, version: 3 },
-		contentChanges: [
-			{
-				text: '<style>@theme { --color-inline-theme: #14b8a6; }</style><div class="bg-inline"></div>',
-			},
-		],
+		contentChanges: [{ text: embeddedDocumentText }],
 	},
 });
 send({
@@ -255,6 +358,32 @@ send({
 	method: "textDocument/didChange",
 	params: {
 		textDocument: { uri: documentUri, version: 4 },
+		contentChanges: [{ text: `${embeddedDocumentText} ` }],
+	},
+});
+send({
+	jsonrpc: "2.0",
+	id: 10,
+	method: "textDocument/completion",
+	params: {
+		textDocument: { uri: documentUri },
+		position: { line: 0, character: 77 },
+		context: { triggerKind: 1 },
+	},
+});
+await waitFor(() => rpcMessages.some((message) => message.id === 10));
+assert.ok(
+	rpcMessages
+		.find((message) => message.id === 10)
+		.result.items.some((item) => item.label === "bg-inline-theme"),
+	"editing outside an unchanged @theme block should reuse its project state",
+);
+
+send({
+	jsonrpc: "2.0",
+	method: "textDocument/didChange",
+	params: {
+		textDocument: { uri: documentUri, version: 5 },
 		contentChanges: [
 			{ text: '<div class="bg-acode-brand"></div>' },
 		],
@@ -284,7 +413,7 @@ send({
 	jsonrpc: "2.0",
 	method: "textDocument/didChange",
 	params: {
-		textDocument: { uri: documentUri, version: 5 },
+		textDocument: { uri: documentUri, version: 6 },
 		contentChanges: [{ text: '<div class="block inline"></div>' }],
 	},
 });
@@ -292,13 +421,13 @@ await waitFor(() =>
 	rpcMessages.some(
 		(message) =>
 			message.method === "textDocument/publishDiagnostics" &&
-			message.params?.version === 5,
+			message.params?.version === 6,
 	),
 );
 const publishedDiagnostics = rpcMessages.find(
 	(message) =>
 		message.method === "textDocument/publishDiagnostics" &&
-		message.params?.version === 5,
+		message.params?.version === 6,
 ).params.diagnostics;
 assert.ok(
 	publishedDiagnostics.length > 0,
@@ -323,6 +452,35 @@ const codeActions = rpcMessages.find((message) => message.id === 7).result;
 assert.ok(
 	codeActions.length > 0,
 	"Tailwind diagnostics should provide quick-fix code actions",
+);
+
+const discoveriesBeforeWatch = hostCalls.get("findProjectFiles") ?? 0;
+send({
+	jsonrpc: "2.0",
+	method: "workspace/didChangeWatchedFiles",
+	params: {
+		changes: [
+			{ uri: documentUri, type: 2 },
+			{ uri: "file:///workspace/src/unrelated.css", type: 2 },
+		],
+	},
+});
+await new Promise((resolve) => setTimeout(resolve, 400));
+assert.equal(
+	hostCalls.get("findProjectFiles") ?? 0,
+	discoveriesBeforeWatch,
+	"ordinary source-file changes should not rescan the Tailwind workspace",
+);
+
+send({
+	jsonrpc: "2.0",
+	method: "workspace/didChangeWatchedFiles",
+	params: {
+		changes: [{ uri: "file:///workspace/src/app.css", type: 2 }],
+	},
+});
+await waitFor(
+	() => (hostCalls.get("findProjectFiles") ?? 0) > discoveriesBeforeWatch,
 );
 
 console.log("Worker smoke test passed");

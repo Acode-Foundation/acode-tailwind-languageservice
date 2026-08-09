@@ -29,12 +29,18 @@ export type ProjectState = {
 	state: State;
 	entryUri: string | null;
 	projectBase: string;
-	degraded: boolean;
 	sourceCss: string;
+};
+
+type DocumentProject = {
+	baseProject: ProjectState;
+	embeddedCss: string;
+	project: Promise<ProjectState>;
 };
 
 const MAX_PROJECTS = 12;
 const MAX_CSS_CANDIDATES = 100;
+const CSS_READ_CONCURRENCY = 8;
 const ENTRY_PATTERN =
 	/@import\s+["']tailwindcss(?:\/[^"']*)?["']|@tailwind\s+(?:base|components|utilities)|@theme\b|@config\b|@plugin\b/;
 const STYLE_PATTERN = /<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi;
@@ -133,11 +139,9 @@ export class TailwindProjectManager {
 	#settings: Settings;
 	#fallback: ProjectState | null = null;
 	#projects: ProjectState[] = [];
-	#documentProjects = new Map<
-		string,
-		{ version: number; project: ProjectState }
-	>();
+	#documentProjects = new Map<string, DocumentProject>();
 	#initialization: Promise<void> | null = null;
+	#reloadChain: Promise<void> = Promise.resolve();
 
 	constructor(
 		host: WorkerHostClient,
@@ -150,7 +154,10 @@ export class TailwindProjectManager {
 	}
 
 	initialize(): Promise<void> {
-		if (!this.#initialization) this.#initialization = this.#initialize();
+		if (!this.#initialization) {
+			this.#initialization = this.#initialize();
+			this.#reloadChain = this.#initialization;
+		}
 		return this.#initialization;
 	}
 
@@ -160,8 +167,31 @@ export class TailwindProjectManager {
 
 	async reload(): Promise<void> {
 		this.#documentProjects.clear();
-		this.#initialization = this.#initialize();
-		await this.#initialization;
+		const reload = this.#reloadChain
+			.catch(() => undefined)
+			.then(() => this.#initialize());
+		this.#reloadChain = reload;
+		this.#initialization = reload;
+		await reload;
+	}
+
+	shouldReloadForFiles(
+		changes: Array<{ uri: string; type?: number }>,
+	): boolean {
+		const dependencies = new Set<string>();
+		for (const project of this.#projects) {
+			if (project.entryUri) dependencies.add(project.entryUri);
+			for (const dependency of project.state.dependencies ?? []) {
+				dependencies.add(dependency);
+			}
+		}
+
+		return changes.some(
+			({ uri, type }) =>
+				dependencies.has(uri) ||
+				/(?:^|\/)tailwind\.config\.(?:js|cjs|mjs|ts|cts|mts)$/i.test(uri) ||
+				(type === 1 && /\.(?:css|scss|sass|less|pcss|postcss)$/i.test(uri)),
+		);
 	}
 
 	async stateFor(uri: string): Promise<State> {
@@ -172,22 +202,38 @@ export class TailwindProjectManager {
 	async stateForDocument(document: TextDocument): Promise<State> {
 		await this.initialize();
 		const embeddedCss = extractEmbeddedTailwindCss(document);
-		if (!embeddedCss) return this.#projectFor(document.uri).state;
-
-		const cached = this.#documentProjects.get(document.uri);
-		if (cached?.version === document.version) return cached.project.state;
+		if (!embeddedCss) {
+			this.#documentProjects.delete(document.uri);
+			return this.#projectFor(document.uri).state;
+		}
 
 		const baseProject = this.#projectFor(document.uri);
-		const project = await this.#createProjectState(
+		const cached = this.#documentProjects.get(document.uri);
+		if (
+			cached?.baseProject === baseProject &&
+			cached.embeddedCss === embeddedCss
+		) {
+			return (await cached.project).state;
+		}
+
+		const project = this.#createProjectState(
 			`${baseProject.sourceCss}\n${embeddedCss}`,
 			document.uri,
 			baseProject.projectBase,
 		);
 		this.#documentProjects.set(document.uri, {
-			version: document.version,
+			baseProject,
+			embeddedCss,
 			project,
 		});
-		return project.state;
+		try {
+			return (await project).state;
+		} catch (error) {
+			if (this.#documentProjects.get(document.uri)?.project === project) {
+				this.#documentProjects.delete(document.uri);
+			}
+			throw error;
+		}
 	}
 
 	closeDocument(uri: string): void {
@@ -195,8 +241,12 @@ export class TailwindProjectManager {
 	}
 
 	#projectFor(uri: string): ProjectState {
-		if (!this.#fallback) throw new Error("Tailwind fallback state is unavailable");
-		if (!this.#projects.length) return this.#fallback;
+		if (!this.#projects.length) {
+			if (!this.#fallback) {
+				throw new Error("Tailwind fallback state is unavailable");
+			}
+			return this.#fallback;
+		}
 
 		let best = this.#projects[0];
 		let bestScore = -1;
@@ -260,74 +310,94 @@ export class TailwindProjectManager {
 	}
 
 	async #initialize(): Promise<void> {
-		this.#fallback = await this.#createProjectState(
-			tailwindIndexCss,
-			null,
-			"tailwindcss://default/",
-		);
-		this.#projects = [];
+		const projects: ProjectState[] = [];
 
-		if (!this.#rootUri) {
-			log("info", "No workspace root; using bundled Tailwind CSS defaults");
-			return;
-		}
-
-		let files: ProjectFiles;
-		try {
-			files = await this.#host.findProjectFiles(this.#rootUri);
-		} catch (error) {
-			log(
-				"warn",
-				`Project discovery failed; using defaults: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-			return;
-		}
-
-		if (files.truncated) {
-			log(
-				"warn",
-				"Workspace scan reached its safety limit; some Tailwind entrypoints may be omitted",
-			);
-		}
-
-		const entrypoints: Array<{ uri: string; css: string }> = [];
-		for (const uri of files.css.slice(0, MAX_CSS_CANDIDATES)) {
+		if (this.#rootUri) {
+			let files: ProjectFiles | null = null;
 			try {
-				const css = await this.#host.readFile(uri);
-				if (ENTRY_PATTERN.test(css)) entrypoints.push({ uri, css });
-				if (entrypoints.length >= MAX_PROJECTS) break;
-			} catch {
-				// A single unreadable file should not disable the workspace service.
-			}
-		}
-
-		for (const entrypoint of entrypoints) {
-			try {
-				this.#projects.push(
-					await this.#createProjectState(entrypoint.css, entrypoint.uri),
-				);
+				files = await this.#host.findProjectFiles(this.#rootUri);
 			} catch (error) {
 				log(
 					"warn",
-					`Skipped Tailwind entrypoint ${entrypoint.uri}: ${
+					`Project discovery failed; using defaults: ${
 						error instanceof Error ? error.message : String(error)
 					}`,
 				);
 			}
+
+			if (files?.truncated) {
+				log(
+					"warn",
+					"Workspace scan reached its safety limit; some Tailwind entrypoints may be omitted",
+				);
+			}
+
+			const candidates = files?.css.slice(0, MAX_CSS_CANDIDATES) ?? [];
+			const entrypoints: Array<{ uri: string; css: string }> = [];
+			for (
+				let offset = 0;
+				offset < candidates.length && entrypoints.length < MAX_PROJECTS;
+				offset += CSS_READ_CONCURRENCY
+			) {
+				const batch = candidates.slice(offset, offset + CSS_READ_CONCURRENCY);
+				const contents = await Promise.all(
+					batch.map(async (uri) => {
+						try {
+							return { uri, css: await this.#host.readFile(uri) };
+						} catch {
+							return null;
+						}
+					}),
+				);
+				for (const candidate of contents) {
+					if (candidate && ENTRY_PATTERN.test(candidate.css)) {
+						entrypoints.push(candidate);
+						if (entrypoints.length >= MAX_PROJECTS) break;
+					}
+				}
+			}
+
+			for (const entrypoint of entrypoints) {
+				try {
+					projects.push(
+						await this.#createProjectState(entrypoint.css, entrypoint.uri),
+					);
+				} catch (error) {
+					log(
+						"warn",
+						`Skipped Tailwind entrypoint ${entrypoint.uri}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+			}
 		}
 
-		if (this.#projects.length) {
+		let fallback: ProjectState | null = null;
+		if (projects.length) {
 			log(
 				"info",
-				`Loaded ${this.#projects.length} Tailwind CSS project${
-					this.#projects.length === 1 ? "" : "s"
+				`Loaded ${projects.length} Tailwind CSS project${
+					projects.length === 1 ? "" : "s"
 				}`,
 			);
 		} else {
-			log("info", "No Tailwind CSS entrypoint found; using bundled defaults");
+			fallback = await this.#createProjectState(
+				tailwindIndexCss,
+				null,
+				"tailwindcss://default/",
+			);
+			log(
+				"info",
+				this.#rootUri
+					? "No Tailwind CSS entrypoint found; using bundled defaults"
+					: "No workspace root; using bundled Tailwind CSS defaults",
+			);
 		}
+
+		this.#documentProjects.clear();
+		this.#projects = projects;
+		this.#fallback = fallback;
 	}
 
 	async #createProjectState(
@@ -338,7 +408,6 @@ export class TailwindProjectManager {
 		const projectBase = explicitBase ?? (entryUri ? dirname(entryUri) : "/");
 		const dependencies = new Set<string>();
 		if (entryUri) dependencies.add(entryUri);
-		let degraded = false;
 		let designSystem: CoreDesignSystem;
 
 		const options = {
@@ -389,7 +458,6 @@ export class TailwindProjectManager {
 		} catch (firstError) {
 			const sanitized = sanitizeProjectCss(css);
 			if (sanitized === css) throw firstError;
-			degraded = true;
 			log(
 				"warn",
 				`${entryUri ?? "Tailwind project"} contains a module that cannot run in a Web Worker; loading CSS theme without @plugin/@config`,
@@ -398,12 +466,10 @@ export class TailwindProjectManager {
 		}
 
 		const serviceDesignSystem = adaptDesignSystem(designSystem, dependencies);
-		const classList = designSystem
-			.getClassList()
-			.map(([className, metadata]) => [
-				className,
-				{ ...metadata, color: null },
-			]) as State["classList"];
+		// Tailwind v4 metadata omits the legacy `color` field. The language
+		// service treats an absent color as null, so reuse the list instead of
+		// cloning tens of thousands of entries for every project.
+		const classList = designSystem.getClassList() as unknown as State["classList"];
 
 		const state = createState({
 			enabled: true,
@@ -437,7 +503,6 @@ export class TailwindProjectManager {
 			state,
 			entryUri,
 			projectBase,
-			degraded,
 			sourceCss: css,
 		};
 	}
@@ -445,7 +510,11 @@ export class TailwindProjectManager {
 
 function extractEmbeddedTailwindCss(document: TextDocument): string | null {
 	const language = document.languageId.toLowerCase();
-	if (!["html", "vue", "svelte", "astro", "php", "blade", "twig", "erb"].includes(language)) {
+	if (
+		!["html", "vue", "svelte", "astro", "php", "blade", "twig", "erb"].includes(
+			language,
+		)
+	) {
 		return null;
 	}
 

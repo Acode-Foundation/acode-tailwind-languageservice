@@ -5,20 +5,6 @@ type FileEntry = {
 	isFile?: boolean;
 };
 
-type HostRequest = {
-	kind: "host-request";
-	id: number;
-	method: string;
-	params?: Record<string, unknown>;
-};
-
-type HostResponse = {
-	kind: "host-response";
-	id: number;
-	result?: unknown;
-	error?: string;
-};
-
 const EXCLUDED_DIRECTORIES = new Set([
 	".git",
 	".hg",
@@ -37,15 +23,11 @@ const EXCLUDED_DIRECTORIES = new Set([
 	".turbo",
 ]);
 
-const CONFIG_PATTERN = /^tailwind\.config\.(?:js|cjs|mjs|ts|cts|mts)$/i;
 const CSS_PATTERN = /\.(?:css|scss|sass|less|pcss|postcss)$/i;
 const MAX_DIRECTORIES = 600;
 const MAX_FILES = 2500;
 const MAX_DEPTH = 14;
-
-function messageOf(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
+const DIRECTORY_READ_CONCURRENCY = 4;
 
 export class AcodeHost {
 	readonly #fs: Acode.FS;
@@ -56,23 +38,11 @@ export class AcodeHost {
 		this.#url = acode.require("Url");
 	}
 
-	async handle(message: HostRequest): Promise<HostResponse> {
-		const response: HostResponse = {
-			kind: "host-response",
-			id: message.id,
-		};
-
-		try {
-			response.result = await this.call(message.method, message.params ?? {});
-		} catch (error) {
-			response.error = messageOf(error);
-		}
-
-		return response;
-	}
-
 	/** Invoke a host method by name (used by worker hostHandlers). */
-	async call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+	async call(
+		method: string,
+		params: Record<string, unknown> = {},
+	): Promise<unknown> {
 		return this.#dispatch(method, params);
 	}
 
@@ -85,10 +55,6 @@ export class AcodeHost {
 				return this.#readFile(String(params.uri ?? ""));
 			case "readDirectory":
 				return this.#readDirectory(String(params.uri ?? ""));
-			case "stat":
-				return this.#stat(String(params.uri ?? ""));
-			case "exists":
-				return this.#exists(String(params.uri ?? ""));
 			case "resolveFile":
 				return this.#resolveFile(
 					String(params.base ?? ""),
@@ -118,10 +84,6 @@ export class AcodeHost {
 			isDirectory: Boolean(entry.isDirectory),
 			isFile: Boolean(entry.isFile),
 		}));
-	}
-
-	async #stat(uri: string): Promise<unknown> {
-		return this.#requireFs(uri).stat();
 	}
 
 	async #exists(uri: string): Promise<boolean> {
@@ -156,55 +118,67 @@ export class AcodeHost {
 
 	async #findProjectFiles(rootUri: string): Promise<{
 		css: string[];
-		configs: string[];
 		truncated: boolean;
 	}> {
-		if (!rootUri) return { css: [], configs: [], truncated: false };
+		if (!rootUri) return { css: [], truncated: false };
 
 		const css: string[] = [];
-		const configs: string[] = [];
 		const queue = [{ uri: rootUri, depth: 0 }];
 		let directories = 0;
 		let files = 0;
 		let truncated = false;
 
-		while (queue.length) {
-			const current = queue.shift();
-			if (!current) break;
+		scan: while (queue.length) {
 			if (directories >= MAX_DIRECTORIES || files >= MAX_FILES) {
 				truncated = true;
 				break;
 			}
 
-			directories += 1;
-			let entries: FileEntry[];
-			try {
-				entries = await this.#readDirectory(current.uri);
-			} catch {
-				continue;
-			}
-
-			for (const entry of entries) {
-				if (entry.isDirectory) {
-					if (
-						current.depth < MAX_DEPTH &&
-						!EXCLUDED_DIRECTORIES.has(entry.name)
-					) {
-						queue.push({ uri: entry.url, depth: current.depth + 1 });
+			const batch = queue.splice(
+				0,
+				Math.min(
+					DIRECTORY_READ_CONCURRENCY,
+					MAX_DIRECTORIES - directories,
+				),
+			);
+			directories += batch.length;
+			const results = await Promise.all(
+				batch.map(async (current) => {
+					try {
+						return {
+							current,
+							entries: await this.#readDirectory(current.uri),
+						};
+					} catch {
+						return { current, entries: [] as FileEntry[] };
 					}
-					continue;
-				}
+				}),
+			);
 
-				files += 1;
-				if (CONFIG_PATTERN.test(entry.name)) configs.push(entry.url);
-				if (CSS_PATTERN.test(entry.name)) css.push(entry.url);
-				if (files >= MAX_FILES) break;
+			for (const { current, entries } of results) {
+				for (const entry of entries) {
+					if (entry.isDirectory) {
+						if (
+							current.depth < MAX_DEPTH &&
+							!EXCLUDED_DIRECTORIES.has(entry.name)
+						) {
+							queue.push({ uri: entry.url, depth: current.depth + 1 });
+						}
+						continue;
+					}
+
+					files += 1;
+					if (CSS_PATTERN.test(entry.name)) css.push(entry.url);
+					if (files >= MAX_FILES) {
+						truncated = true;
+						break scan;
+					}
+				}
 			}
 		}
 
 		return {
 			css: rankCssFiles(css),
-			configs,
 			truncated,
 		};
 	}
@@ -225,13 +199,4 @@ function rankCssFiles(files: string[]): string[] {
 		const bPreferred = preferred.test(b) ? 0 : 1;
 		return aPreferred - bPreferred || a.length - b.length || a.localeCompare(b);
 	});
-}
-
-export function isHostRequest(value: unknown): value is HostRequest {
-	return (
-		Boolean(value) &&
-		typeof value === "object" &&
-		(value as { kind?: unknown }).kind === "host-request" &&
-		typeof (value as { id?: unknown }).id === "number"
-	);
 }

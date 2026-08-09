@@ -11,8 +11,6 @@ function createHostHandlers(
 	const methods = [
 		"readFile",
 		"readDirectory",
-		"stat",
-		"exists",
 		"resolveFile",
 		"findProjectFiles",
 	] as const;

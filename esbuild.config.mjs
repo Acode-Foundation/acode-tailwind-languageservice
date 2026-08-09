@@ -46,6 +46,8 @@ const buildConfig = {
     os: "os-browserify/browser",
     path: "path-browserify",
     util: "util",
+    "vscode-emmet-helper-bundled": "./src/shims/vscode-emmet-helper.ts",
+    "vscode-languageserver": "./src/shims/vscode-languageserver.ts",
   },
   inject: ["./src/shims/process.ts"],
   loader: {

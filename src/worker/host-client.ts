@@ -12,7 +12,6 @@ type PendingRequest = {
 
 export type ProjectFiles = {
 	css: string[];
-	configs: string[];
 	truncated: boolean;
 };
 
@@ -86,4 +85,3 @@ export function isHostResponse(value: unknown): value is HostResponse {
 		(value as { kind?: unknown }).kind === "host-response"
 	);
 }
-
